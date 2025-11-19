@@ -1,145 +1,167 @@
-
 #!/bin/bash
-set -euo pipefail
 
-# === Paths & filenames (master) ===
-BASE_DIR="/data/automation/os_config/ubuntu_os_config"
-SERVERS_FILE="${BASE_DIR}/servers.txt"
-SCRIPT_NAME="ubuntu_os_config.sh"
-LOGFILE="${BASE_DIR}/provisioning.log"
-OUTPUT_DIR="${BASE_DIR}/ubuntu_output"
+cd /data/automation/os_config/ubuntu_os_config/
 
-mkdir -p "$BASE_DIR" "$OUTPUT_DIR"
-touch "$LOGFILE"
+SERVERS_FILE="servers.txt"
+SCRIPT="ubuntu_os_config.sh"
+LOGFILE="provisioning.log"
+OUTPUT_DIR="./ubuntu_output"
 
-# === Initialize provisioning log ===
+MAIL_TO="vigneswaran.murthy@sandisk.com"
+MAIL_FROM="ansible_automation@sandisk.com"
+MAIL_CC="PDL-IT-Linux-Support@sandisk.com"
+
+mkdir -p "$OUTPUT_DIR"
+
 echo "Provisioning started at $(date)" > "$LOGFILE"
 echo "----------------------------------------" >> "$LOGFILE"
 
-# Root check (logged)
+# Requires root privileges
 if [[ $EUID -ne 0 ]]; then
   echo "***** Please run this script as root to change the system time zone *****" | tee -a "$LOGFILE"
   exit 1
 fi
-echo "[MASTER] Running as root user — OK" | tee -a "$LOGFILE"
 
-# Helper: write task status in master for a host
-log_task_master() {
-  local HOST="$1"
-  local TASK_NAME="$2"
-  local STATUS="$3"
-  local HOST_DIR="${OUTPUT_DIR}/${HOST}"
-  mkdir -p "$HOST_DIR"
-  echo -e "${TASK_NAME}\t${STATUS}" >> "${HOST_DIR}/status.txt"
-}
-
-# Validate servers file exists
-if [[ ! -f "$SERVERS_FILE" ]]; then
-  echo "[MASTER] Servers file not found: $SERVERS_FILE" | tee -a "$LOGFILE"
+if [ ! -f "$SERVERS_FILE" ]; then
+  echo "***** Error: $SERVERS_FILE not found *****" | tee -a "$LOGFILE"
   exit 1
 fi
 
-echo "[MASTER] Provisioning started at $(date)" | tee -a "$LOGFILE"
-echo "----------------------------------------" >> "$LOGFILE"
+# ====== PROCESS EACH HOST ======
+for HOST in `cat $SERVERS_FILE`
+do
+  [ -z "$HOST" ] && continue
 
-# Iterate through servers (skip blank lines and comments)
-while IFS= read -r RAW_HOST || [[ -n "$RAW_HOST" ]]; do
-  HOST="$(echo "$RAW_HOST" | awk '{$1=$1;print}')"
-  [[ -z "$HOST" || "$HOST" =~ ^# ]] && continue
+  echo "=== [$HOST] Starting provisioning... ===" | tee -a "$LOGFILE"
 
-  echo "[MASTER] === [$HOST] Starting provisioning... ===" | tee -a "$LOGFILE"
   HOST_DIR="${OUTPUT_DIR}/${HOST}"
   mkdir -p "$HOST_DIR"
-  : > "${HOST_DIR}/status.txt"   # fresh run: truncate
+  : > "$HOST_DIR/status.txt"
 
-  # 1) Test SSH connectivity
-  ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "echo SSH_OK" >/dev/null 2>&1
-  if [[ $? -ne 0 ]]; then
-    echo "[MASTER] [$HOST] SSH connection failed. Skipping." | tee -a "$LOGFILE"
-    log_task_master "$HOST" "SSH Connection" "Failed"
-    continue
-  else
-    echo "[MASTER] [$HOST] SSH connection successful." | tee -a "$LOGFILE"
-    log_task_master "$HOST" "SSH Connection" "Success"
-  fi
-
-  # 2) Copy provisioning script
-  scp "${BASE_DIR}/${SCRIPT_NAME}" "$HOST:/tmp/${SCRIPT_NAME}" >> "$LOGFILE" 2>&1
-  if [[ $? -ne 0 ]]; then
-    echo "[MASTER] [$HOST] Failed to copy ${SCRIPT_NAME}" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy Provisioning Script" "Failed"
-    continue
-  else
-    echo "[MASTER] [$HOST] Copied ${SCRIPT_NAME}" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy Provisioning Script" "Success"
-  fi
-
-  # 3) Copy optional artifacts (adjust paths if needed)
-  scp /root/important_package/team.keys "$HOST:/tmp/ssh_keys.txt" >> "$LOGFILE" 2>&1
-  if [[ $? -ne 0 ]]; then
-    echo "[MASTER] [$HOST] Copy SSH Keys FAILED" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy SSH Keys File" "Failed"
-  else
-    echo "[MASTER] [$HOST] Copy SSH Keys OK" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy SSH Keys File" "Success"
-  fi
-
-  scp /root/important_package/falcon_package/falcon-sensor_7.20.17306.deb "$HOST:/tmp/" >> "$LOGFILE" 2>&1
-  if [[ $? -ne 0 ]]; then
-    echo "[MASTER] [$HOST] Copy Falcon Sensor FAILED" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy Falcon Sensor" "Failed"
-  else
-    echo "[MASTER] [$HOST] Copy Falcon Sensor OK" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy Falcon Sensor" "Success"
-  fi
-
-  # 4) Write per-host FQDN file and copy
   echo "$HOST" > /tmp/pws
+
+  # Test SSH connection
+  ssh -o StrictHostKeyChecking=no -o BatchMode=yes -o ConnectTimeout=10 "$HOST" "echo OK" >/dev/null 2>&1
+  if [ $? -ne 0 ]; then
+    echo "=== [$HOST] SSH connection failed ===" | tee -a "$LOGFILE"
+    echo -e "SSH Connection\tFailed" >> "$HOST_DIR/status.txt"
+    continue
+  fi
+
+  echo -e "SSH Connection\tSuccess" >> "$HOST_DIR/status.txt"
+
+  # Copy files
+  scp "$SCRIPT" "$HOST:/tmp/$SCRIPT" >> "$LOGFILE" 2>&1
+  scp /root/important_package/team.keys "$HOST:/tmp/ssh_keys.txt" >> "$LOGFILE" 2>&1
+  scp /root/important_package/falcon_package/falcon-sensor_7.20.17306.deb "$HOST:/tmp" >> "$LOGFILE" 2>&1
   scp /tmp/pws "$HOST:/tmp/servers.txt" >> "$LOGFILE" 2>&1
-  if [[ $? -ne 0 ]]; then
-    echo "[MASTER] [$HOST] Copy FQDN File FAILED" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy FQDN File" "Failed"
+
+  if [ $? -ne 0 ]; then
+    echo -e "Copy Required Files\tFailed" >> "$HOST_DIR/status.txt"
+    continue
   else
-    echo "[MASTER] [$HOST] Copy FQDN File OK" | tee -a "$LOGFILE"
-    log_task_master "$HOST" "Copy FQDN File" "Success"
+    echo -e "Copy Required Files\tSuccess" >> "$HOST_DIR/status.txt"
   fi
 
-  # 5) Execute remote provisioning and capture output to temp file
-  echo "[MASTER] [$HOST] Executing remote provisioning script" | tee -a "$LOGFILE"
-  TMP_OUT="$(mktemp)"
-  # Run ssh and capture both stdout/stderr into TMP_OUT
-  ssh -o StrictHostKeyChecking=no "$HOST" "bash /tmp/${SCRIPT_NAME}" > "$TMP_OUT" 2>&1
-  SSH_RC=$?
+  echo "=== [$HOST] Running remote provisioning ... ===" | tee -a "$LOGFILE"
 
-  # Process captured output line-by-line
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  # Capture TASK::<task>::<status>
+  ssh -o StrictHostKeyChecking=no "$HOST" "bash /tmp/$SCRIPT" 2>&1 | while IFS= read -r line; do
+
     if [[ "$line" == TASK::* ]]; then
-      TASK_NAME="$(echo "$line" | cut -d'::' -f2)"
-      STATUS="$(echo "$line" | cut -d'::' -f3)"
-      TASK_NAME="$(echo -e "$TASK_NAME" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-      STATUS="$(echo -e "$STATUS" | awk '{print tolower($0)}' | sed -e 's/^./\U&/')"
-      echo -e "${TASK_NAME}\t${STATUS}" >> "${HOST_DIR}/status.txt"
-      echo "[${HOST}] TASK ${TASK_NAME}: ${STATUS}" >> "$LOGFILE"
+        TASK_NAME=$(echo "$line" | cut -d"::" -f2)
+        STATUS=$(echo "$line" | cut -d"::" -f3)
+
+        echo -e "${TASK_NAME}\t${STATUS}" >> "$HOST_DIR/status.txt"
+        echo "[${HOST}] TASK ${TASK_NAME}: ${STATUS}" >> "$LOGFILE"
     else
-      # generic output
-      echo "[${HOST}] ${line}" >> "$LOGFILE"
+        echo "[${HOST}] ${line}" >> "$LOGFILE"
     fi
-  done < "$TMP_OUT"
 
-  rm -f "$TMP_OUT"
+  done
 
-  # Log overall ssh exit
-  if [[ $SSH_RC -eq 0 ]]; then
-    log_task_master "$HOST" "Remote Provisioning Script" "Success"
-    echo "[MASTER] [$HOST] Remote provisioning completed successfully." | tee -a "$LOGFILE"
-  else
-    log_task_master "$HOST" "Remote Provisioning Script" "Failed"
-    echo "[MASTER] [$HOST] Remote provisioning finished with error (ssh rc=${SSH_RC})." | tee -a "$LOGFILE"
-  fi
+  # Retrieve remote provisioning log
+  scp "$HOST:/tmp/provisioning_remote.log" "$HOST_DIR/provisioning_remote.log" >> "$LOGFILE" 2>&1 || \
+      echo "[${HOST}] No remote provisioning log found" >> "$LOGFILE"
 
-  echo "[MASTER] === [$HOST] Finished provisioning ===" | tee -a "$LOGFILE"
-  echo "----------------------------------------" >> "$LOGFILE"
+  echo -e "Remote Provisioning Script\tSuccess" >> "$HOST_DIR/status.txt"
 
-done < "$SERVERS_FILE"
+done
 
-echo "[MASTER] Provisioning completed at $(date)" | tee -a "$LOGFILE"
+# ================================================
+#  SEND EMAIL REPORT FOR EACH HOST (HTML FORMAT)
+# ================================================
+
+MAIL_BIN=$(command -v mail || command -v mailx || echo "")
+
+if [[ -z "$MAIL_BIN" ]]; then
+    echo "ERROR: mail/mailx not installed. Cannot send email." | tee -a "$LOGFILE"
+    exit 1
+fi
+
+for HOST_DIR in "$OUTPUT_DIR"/*/; do
+    HOST=$(basename "$HOST_DIR")
+    STATUS_FILE="${HOST_DIR}/status.txt"
+
+    if [[ -f "$STATUS_FILE" ]]; then
+        mapfile -t STATUS_LINES < "$STATUS_FILE"
+    else
+        STATUS_LINES=("No tasks executed for this host")
+    fi
+
+    HTML_ROWS=""
+    idx=0
+    for LINE in "${STATUS_LINES[@]}"; do
+        TASK=$(echo "$LINE" | awk -F'\t' '{print $1}')
+        STATUS=$(echo "$LINE" | awk -F'\t' '{print $2}')
+
+        if (( idx % 2 == 0 )); then
+            ROW_COLOR="#ffffff"
+        else
+            ROW_COLOR="#f9f9f9"
+        fi
+
+        if [[ "$STATUS" == "Success" ]]; then
+            STATUS_HTML='<span style="color: green; font-weight: bold;">✅ Success</span>'
+        elif [[ "$STATUS" == "Failed" ]]; then
+            STATUS_HTML='<span style="color: red; font-weight: bold;">❌ Failed</span>'
+        else
+            STATUS_HTML="<span style=\"color: orange; font-weight: bold;\">⚠️ ${STATUS}</span>"
+        fi
+
+        HTML_ROWS+="<tr style=\"background-color: ${ROW_COLOR};\">
+                        <td style=\"padding: 6px;\">${TASK}</td>
+                        <td style=\"padding: 6px; text-align: center;\">${STATUS_HTML}</td>
+                    </tr>"
+        ((idx++))
+    done
+
+    EMAIL_BODY=$(cat <<EOF
+<html>
+<body style="font-family: Arial; background-color: #fafafa; padding: 20px; text-align:center;">
+  <div style="background:#fff; padding:20px; border-radius:8px; display:inline-block;">
+    <p style="font-size: 16px; font-weight: bold;">Provisioning Task Summary for ${HOST}</p>
+    <table border="1" cellpadding="8" cellspacing="0" style="width:650px; border-collapse: collapse;">
+      <tr style="background:#f2f2f2;">
+        <th>Task Name</th>
+        <th>Status</th>
+      </tr>
+      ${HTML_ROWS}
+    </table>
+  </div>
+</body>
+</html>
+EOF
+    )
+
+    echo "$EMAIL_BODY" | $MAIL_BIN -a "Content-Type: text/html" \
+        -s "Provisioning Task Summary - ${HOST}" \
+        -r "${MAIL_FROM}" \
+        -c "${MAIL_CC}" \
+        "${MAIL_TO}"
+
+    echo "[EMAIL] Sent summary for ${HOST}" | tee -a "$LOGFILE"
+
+done
+
+echo "All emails delivered."
